@@ -3,7 +3,6 @@ import {
   Routes,
   Route,
   Navigate,
-  useNavigate,
 } from "react-router-dom";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import UploadForm from "./components/UploadForm";
@@ -13,7 +12,7 @@ import DocumentTable from "./components/DocumentTable";
 import LoginForm from "./components/LoginForm";
 import RegisterForm from "./components/RegisterForm";
 import { Container, Button, Navbar, Nav } from "react-bootstrap";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 function MainApp() {
   const { user, logout } = useAuth();
@@ -46,7 +45,6 @@ function MainApp() {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      credentials: "include",
     })
       .then((res) => {
         triggerRefresh();

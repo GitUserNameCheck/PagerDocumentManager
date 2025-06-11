@@ -70,6 +70,9 @@ export default function UploadForm(props) {
   return (
     <Form className="mb-3">
       <Form.Label>Загрузить документ</Form.Label>
+      <div>
+        {progress + "%"}
+      </div>
       <InputGroup>
         <Form.Control
           type="file"

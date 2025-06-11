@@ -67,6 +67,8 @@ def create_document():
     rpt = Report(document_id=doc.id, data=data["json"])
     db.session.add(rpt)
 
+    print(data["json"])
+
     img64 = data.get('image64')
     if img64:
         header, b64 = img64.split(',', 1)

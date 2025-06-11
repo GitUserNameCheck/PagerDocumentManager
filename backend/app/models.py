@@ -1,4 +1,5 @@
 from flask_login import UserMixin
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import JSON, ForeignKeyConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from app.database import db
@@ -75,3 +76,21 @@ class Report(db.Model):
     def __init__(self, document_id, data):
         self.document_id = document_id
         self.data = data
+
+
+class Embedding(db.Model):
+    __tablename__ = 'embedding'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    document_id = db.Column(db.Integer, nullable=False)
+    vector = db.Column(Vector(512), nullable=False)  # or whatever dimensionality you use
+    text = db.Column(db.Text, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint([document_id], [Document.id], ondelete='CASCADE'),
+    )
+
+    def __init__(self, document_id, vector, text):
+        self.document_id = document_id
+        self.vector = vector
+        self.text = text
