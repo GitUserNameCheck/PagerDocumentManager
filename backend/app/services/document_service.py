@@ -1,6 +1,8 @@
 from sqlalchemy import text, asc, desc
 from app.models import Document
 from app.database import db
+from sentence_transformers import SentenceTransformer
+import torch
 import re
 
 def generate_unique_name(owner_id: int, base_name: str) -> str:
@@ -78,76 +80,105 @@ def get_documents(search: str,
     filtered_ids = []
 
     if search:
-        value = search
-        if ignore_punct:
-            value = ''.join([c for c in value if c.isalnum() or c.isspace()])
-        if ignore_spaces:
-            value = value.replace(' ', '')
+        if labels and "sentence" in labels:
+            #https://www.sbert.net/docs/sentence_transformer/pretrained_models.html
+            #https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v1
+            model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
 
-        text_expr = preprocess_expr("blk->>'text'", ignore_punct, ignore_spaces, case_sensitive)
-        name_expr = preprocess_expr("d.name", ignore_punct, ignore_spaces, case_sensitive)
-        comment_expr = preprocess_expr("d.comment", ignore_punct, ignore_spaces, case_sensitive)
+            if torch.cuda.is_available():
+                model = model.to('cuda')
 
-        if case_sensitive:
-            patterns = [value]
+            search_embedding = model.encode(search)
+            search_vec_list = search_embedding.tolist()
+
+            sql = f"""
+                SELECT
+                    e.document_id,
+                    MAX(1 - (e.vector <#> :query_vector)) AS similarity
+                FROM embedding e
+                GROUP BY e.document_id
+                HAVING MAX(1 - (e.vector <#> :query_vector)) > 0.5
+                ORDER BY similarity DESC
+                """
+
+            result = db.session.execute(text(sql), {"query_vector": search_vec_list})
+            matching_docs = result.fetchall()
+            filtered_ids = [row[0] for row in matching_docs]
+            if not filtered_ids:
+                return []
+            docs_q = docs_q.filter(Document.id.in_(filtered_ids))
+
         else:
-            patterns = generate_case_variants(value)
+            value = search
+            if ignore_punct:
+                value = ''.join([c for c in value if c.isalnum() or c.isspace()])
+            if ignore_spaces:
+                value = value.replace(' ', '')
 
-        pattern_clauses = []
-        params = {"labels": labels or []}
-        for idx, val in enumerate(patterns):
-            key = f"pattern_{idx}"
-            if full_word:
-                pattern = f"\\y{val}\\y"
-                clause = f"{text_expr} {'~' if case_sensitive else '~*'} :{key}"
+            text_expr = preprocess_expr("blk->>'text'", ignore_punct, ignore_spaces, case_sensitive)
+            name_expr = preprocess_expr("d.name", ignore_punct, ignore_spaces, case_sensitive)
+            comment_expr = preprocess_expr("d.comment", ignore_punct, ignore_spaces, case_sensitive)
+
+            if case_sensitive:
+                patterns = [value]
             else:
-                pattern = f"%{val}%"
-                clause = f"{text_expr} {'LIKE' if case_sensitive else 'ILIKE'} :{key}"
-            pattern_clauses.append(clause)
-            params[key] = pattern
+                patterns = generate_case_variants(value)
 
-        text_clause_sql = "(" + " OR ".join(pattern_clauses) + ")"
+            pattern_clauses = []
+            params = {"labels": labels or []}
+            for idx, val in enumerate(patterns):
+                key = f"pattern_{idx}"
+                if full_word:
+                    pattern = f"\\y{val}\\y"
+                    clause = f"{text_expr} {'~' if case_sensitive else '~*'} :{key}"
+                else:
+                    pattern = f"%{val}%"
+                    clause = f"{text_expr} {'LIKE' if case_sensitive else 'ILIKE'} :{key}"
+                pattern_clauses.append(clause)
+                params[key] = pattern
 
-        name_comment_clauses = []
-        for idx, val in enumerate(patterns, start=len(patterns)):
-            key = f"pattern_{idx}"
-            if full_word:
-                pattern = f"\\y{val}\\y"
-                op = '~' if case_sensitive else '~*'
-            else:
-                pattern = f"%{val}%"
-                op = 'LIKE' if case_sensitive else 'ILIKE'
+            text_clause_sql = "(" + " OR ".join(pattern_clauses) + ")"
 
-            if labels and 'name' in labels:
-                name_comment_clauses.append(f"{name_expr} {op} :{key}")
-            if labels and 'commentary' in labels:
-                name_comment_clauses.append(f"{comment_expr} {op} :{key}")
-            params[key] = pattern
+            name_comment_clauses = []
+            for idx, val in enumerate(patterns, start=len(patterns)):
+                key = f"pattern_{idx}"
+                if full_word:
+                    pattern = f"\\y{val}\\y"
+                    op = '~' if case_sensitive else '~*'
+                else:
+                    pattern = f"%{val}%"
+                    op = 'LIKE' if case_sensitive else 'ILIKE'
 
-        extra_clause = f" OR ({' OR '.join(name_comment_clauses)})" if name_comment_clauses else ""
+                if labels and 'name' in labels:
+                    name_comment_clauses.append(f"{name_expr} {op} :{key}")
+                if labels and 'commentary' in labels:
+                    name_comment_clauses.append(f"{comment_expr} {op} :{key}")
+                params[key] = pattern
 
-        sql = f"""
-        SELECT DISTINCT d.id
-        FROM document d
-        LEFT JOIN report r ON r.document_id = d.id
-        WHERE (
-            EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements(r.data->'blocks') AS blk
-                WHERE
-                    {"TRUE AND" if not labels else "blk->>'label' = ANY(:labels) AND"}
-                    {text_clause_sql}
+            extra_clause = f" OR ({' OR '.join(name_comment_clauses)})" if name_comment_clauses else ""
+
+            sql = f"""
+            SELECT DISTINCT d.id
+            FROM document d
+            LEFT JOIN report r ON r.document_id = d.id
+            WHERE (
+                EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(r.data->'blocks') AS blk
+                    WHERE
+                        {"TRUE AND" if not labels else "blk->>'label' = ANY(:labels) AND"}
+                        {text_clause_sql}
+                )
+                {extra_clause}
             )
-            {extra_clause}
-        )
-        """
+            """
 
-        result = db.session.execute(text(sql), params)
-        filtered_ids = [r[0] for r in result.fetchall()]
-        if not filtered_ids:
-            return []
+            result = db.session.execute(text(sql), params)
+            filtered_ids = [r[0] for r in result.fetchall()]
+            if not filtered_ids:
+                return []
 
-        docs_q = docs_q.filter(Document.id.in_(filtered_ids))
+            docs_q = docs_q.filter(Document.id.in_(filtered_ids))
     else:
         filtered_ids = [d.id for d in docs_q.all()]
 

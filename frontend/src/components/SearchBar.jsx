@@ -52,6 +52,7 @@ export default function SearchBar({
 
     if (showAdvanced) {
       searchData.fields = {
+        sentence: value?.includes("sentence") || false,
         header: value?.includes("header") || false,
         text: value?.includes("text") || false,
         list: value?.includes("list") || false,
@@ -118,6 +119,13 @@ export default function SearchBar({
                 value={value}
                 onChange={handleChangeVal}
               >
+                <ToggleButton
+                  id="tbg-btn-7-val"
+                  variant="outline-primary"
+                  value={"sentence"}
+                >
+                  Предложениях
+                </ToggleButton>
                 <ToggleButton
                   id="tbg-btn-1-val"
                   variant="outline-primary"

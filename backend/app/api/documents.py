@@ -1,11 +1,16 @@
 from flask import Blueprint, request, jsonify, abort, url_for
 from flask_login import login_required, current_user
-from app.models import Document, Report
+from app.models import Document, Report, Embedding
 from app.database import db
 from app.services import get_documents, generate_unique_name
 from datetime import datetime
 import os, base64, uuid
 from flask import current_app, send_from_directory
+import re
+import spacy
+from sentence_transformers import SentenceTransformer
+import torch
+
 
 docs_bp = Blueprint('documents', __name__, url_prefix='/api/documents')
 
@@ -67,8 +72,6 @@ def create_document():
     rpt = Report(document_id=doc.id, data=data["json"])
     db.session.add(rpt)
 
-    print(data["json"])
-
     img64 = data.get('image64')
     if img64:
         header, b64 = img64.split(',', 1)
@@ -80,6 +83,68 @@ def create_document():
         with open(filepath, 'wb') as f:
             f.write(base64.b64decode(b64))
         doc.image_path = filename
+
+
+    def remove_annotations(data):
+        if isinstance(data, dict):
+            return {k: remove_annotations(v) for k, v in data.items() if k != "annotations"}
+        elif isinstance(data, list):
+            return [remove_annotations(item) for item in data]
+        else:
+            return data
+
+    def get_text(data):
+        results = []
+        def recurse(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key == "text" and not isinstance(value, (dict, list)):
+                        results.append(str(value))
+                    else:
+                        # Only recurse if key != "text" or value is a container
+                        if key != "text":
+                            recurse(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    recurse(item)
+
+        recurse(data)
+        # return results
+        return "".join(results)
+    
+    def preprocess_text(text):
+        # Remove hyphenation at line breaks (e.g., "com-/nputer" -> "computer")
+        text = re.sub(r'-\n', '', text)
+        # Replace other line breaks with a space
+        text = re.sub(r'\n+', ' ', text)
+        # Optional: normalize spaces
+        text = re.sub(r'\s+', ' ', text)
+        # Remove wrong symbols
+        text = re.sub(r'[\uD800-\uDFFF]', '', text)
+        return text
+
+    clean_data = remove_annotations(data["json"])
+    raw_text = get_text(clean_data)
+    preprocessed_text = preprocess_text(raw_text)
+
+    nlp = spacy.load("xx_sent_ud_sm")
+    spacy_doc = nlp(preprocessed_text)
+
+    sentences = [sent.text for sent in spacy_doc.sents]
+
+    model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
+    if torch.cuda.is_available():
+        model = model.to('cuda')
+
+    embeddings = model.encode(sentences)
+
+    for sent_text, emb_vector in zip(sentences, embeddings):
+        emb = Embedding(
+            document_id=doc.id,
+            vector=emb_vector.tolist(),
+            text=sent_text
+        )
+        db.session.add(emb)
 
     db.session.commit()
 
